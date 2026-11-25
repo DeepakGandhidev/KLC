@@ -24,6 +24,7 @@ export default function PlansPage() {
   const [buying, setBuying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [order, setOrder] = useState<{ _id: string; provider: string; payLink: string } | null>(null);
 
   async function fetchData() {
     const [p, m] = await Promise.all([
@@ -56,27 +57,60 @@ export default function PlansPage() {
     memberships.filter((m) => m.status === "active").map((m) => m.plan)
   );
 
+  async function refresh() {
+    try {
+      const d = await fetchData();
+      setPlans(d.plans);
+      setMemberships(d.memberships);
+    } catch {
+      // keep the success state even if the refresh fails
+    }
+  }
+
+  // Step 1: create a live OxaPay invoice
   async function confirmBuy() {
     if (!selected) return;
     setBuying(true);
     setError(null);
     try {
-      await apiSend("/api/memberships", "POST", { planSlug: selected.slug });
-      setSelected(null);
-      setSuccess(true);
-      try {
-        const d = await fetchData();
-        setPlans(d.plans);
-        setMemberships(d.memberships);
-      } catch {
-        // keep the success state even if the refresh fails
-      }
+      const { order: o } = await apiSend<{ order: { _id: string; provider: string; payLink: string } }>(
+        "/api/payments/checkout",
+        "POST",
+        { planSlug: selected.slug }
+      );
+      setOrder(o);
+      if (o.payLink) window.open(o.payLink, "_blank", "noopener");
     } catch (e) {
       setError(
         e instanceof ApiError && e.code === "plan_not_found"
           ? t("error.planNotFound")
           : t("error.generic")
       );
+    } finally {
+      setBuying(false);
+    }
+  }
+
+  // Step 2: confirm the live payment, which activates the plan
+  async function confirmPayment() {
+    if (!order) return;
+    setBuying(true);
+    setError(null);
+    try {
+      const r = await apiSend<{ paid?: boolean; alreadyPaid?: boolean }>(
+        `/api/payments/${order._id}/confirm`,
+        "POST"
+      );
+      if (r.paid || r.alreadyPaid) {
+        setSelected(null);
+        setOrder(null);
+        setSuccess(true);
+        await refresh();
+      } else {
+        setError("Not paid yet. Complete the live payment, then check again.");
+      }
+    } catch {
+      setError(t("error.generic"));
     } finally {
       setBuying(false);
     }
@@ -182,7 +216,7 @@ export default function PlansPage() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
-          onClick={() => !buying && setSelected(null)}
+          onClick={() => !buying && (setSelected(null), setOrder(null))}
         >
           <Card
             glow
@@ -201,6 +235,14 @@ export default function PlansPage() {
                   months: selected.durationMonths,
                 })}
               </p>
+              {order && (
+                <p className="mt-4 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-2.5 text-sm text-amber-200">
+                  Live payment — real funds.{" "}
+                  {order.provider === "oxapay-live"
+                    ? "Complete payment in the OxaPay tab, then check status."
+                    : "Legacy sandbox order; create a new live checkout."}
+                </p>
+              )}
               {error && (
                 <p className="mt-4 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-2.5 text-sm text-red-300">
                   {error}
@@ -209,7 +251,10 @@ export default function PlansPage() {
               <div className="mt-6 flex gap-3">
                 <button
                   type="button"
-                  onClick={() => setSelected(null)}
+                  onClick={() => {
+                    setSelected(null);
+                    setOrder(null);
+                  }}
                   disabled={buying}
                   className={`${btnSecondary} flex-1`}
                 >
@@ -217,11 +262,15 @@ export default function PlansPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={confirmBuy}
+                  onClick={order ? confirmPayment : confirmBuy}
                   disabled={buying}
                   className={`${btnPrimary} flex-1`}
                 >
-                  {buying ? t("common.loading") : t("plans.buyConfirm.confirm")}
+                  {buying
+                    ? t("common.loading")
+                    : order
+                      ? "I paid — check status"
+                      : t("plans.buyConfirm.confirm")}
                 </button>
               </div>
             </div>
